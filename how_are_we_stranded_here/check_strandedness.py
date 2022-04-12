@@ -14,14 +14,16 @@ def is_gz_file(filepath):
 def main():
     parser = argparse.ArgumentParser(description='Check if fastq files are stranded')
     parser.add_argument('-g', '--gtf', type=str, help='Genome annotation GTF file', required = True)
+    parser.add_argument('-b', '--bam', type=str, help='bamfile', required = False)
     parser.add_argument('-fa', '--transcripts', type=str, help='.fasta file with transcript sequences')
     parser.add_argument('-n', '--nreads', type=int, help='number of reads to sample', default = 200000)
-    parser.add_argument('-r1', '--reads_1', type=str, help='fastq.gz file (R1)', required = True)
-    parser.add_argument('-r2', '--reads_2', type=str, help='fastq.gz file (R2)', required = True)
+    parser.add_argument('-r1', '--reads_1', type=str, help='fastq.gz file (R1)', required = False)
+    parser.add_argument('-r2', '--reads_2', type=str, help='fastq.gz file (R2)', required = False)
     parser.add_argument('-k', '--kallisto_index', type=str, help='name of kallisto index (will build under this name if file not found)', default = 'kallisto_index')
     parser.add_argument('-p', '--print_commands', action='store_true', help='Print bash commands as they occur?')
 
     args = parser.parse_args()
+    bamfile = args.bam
     reads_1 = args.reads_1
     reads_2 = args.reads_2
     n_reads = args.nreads
@@ -30,7 +32,12 @@ def main():
     fasta = args.transcripts
     print_cmds = args.print_commands
 
-    if fasta is None and (kallisto_index_name is None or not os.path.exists(kallisto_index_name)):
+    if bamfile and os.path.exists(bamfile):
+        readmode = "bam"
+    else:
+        readmode = "fq"
+
+    if readmode == 'fq' and fasta is None and (kallisto_index_name is None or not os.path.exists(kallisto_index_name)):
         sys.exit('transcript .fasta sequences are required to generate the kallisto index. Please supply with --transcripts')
 
     # check if dependancies available
@@ -66,21 +73,25 @@ def main():
     if not check_gff32gtf:
         sys.exit("gff32gtf is not found in PATH")
 
-    check_kallisto = run_command(cmd = 'kallisto version')
-    if not check_kallisto[1] == b'':
-        sys.exit("kallisto is not found in PATH. Please install from https://pachterlab.github.io/kallisto")
-    else:
-        kallisto_version = str(check_kallisto[0]).split('version ')[1].replace("\\n'","")
-        if int(kallisto_version.split('.')[1]) < 44:
-            sys.exit('Found kallisto ' + kallisto_version +' , but version >= 0.44.0 is required. Please install from https://pachterlab.github.io/kallisto')
+    if readmode == 'fq':
+        check_kallisto = run_command(cmd = 'kallisto version')
+        if not check_kallisto[1] == b'':
+            sys.exit("kallisto is not found in PATH. Please install from https://pachterlab.github.io/kallisto")
+        else:
+            kallisto_version = str(check_kallisto[0]).split('version ')[1].replace("\\n'","")
+            if int(kallisto_version.split('.')[1]) < 44:
+                sys.exit('Found kallisto ' + kallisto_version +' , but version >= 0.44.0 is required. Please install from https://pachterlab.github.io/kallisto')
 
     check_RSeQC = run_command(cmd = 'infer_experiment.py --help')[1] == b''
     if not check_RSeQC:
         sys.exit("infer_experiment.py (RSeQC) is not found in PATH. Please install from http://rseqc.sourceforge.net/#installation")
 
 
+    if readmode == 'fq':
+        test_folder = 'stranded_test_' + os.path.basename(reads_1).replace('.fastq' ,'').replace('.fq' ,'').replace('.gz' ,'')
+    else:
+        test_folder = 'stranded_test_' + os.path.basename(bamfile).replace('.bam','')
     # make a test_folder
-    test_folder = 'stranded_test_' + os.path.basename(reads_1).replace('.fastq' ,'').replace('.fq' ,'').replace('.gz' ,'')
     if not os.path.isdir(test_folder):
         # make directory
         os.mkdir(test_folder)
@@ -116,68 +127,72 @@ def main():
         print('running command: ' + cmd)
     subprocess.call(cmd, shell=True)
 
-    # make kallisto index
-    if os.path.exists(kallisto_index_name):
-        print('using ' + kallisto_index_name + ' as kallisto index')
-    else:
-        print('Checking if fasta headers and bed file transcript_ids match...')
-        check_bed = check_bed_in_fa(bed_filename, fasta)
-        if not check_bed:
-            print("Can't find transcript ids from " + fasta + " in " + bed_filename)
-            print("Trying to converting fasta header format to match transcript ids to the BED file...")
-            cmd = "sed 's/[|]/ /g' " + fasta + " > " + test_folder + "/transcripts.fa"
+    if readmode == 'fq':
+        # make kallisto index
+        if os.path.exists(kallisto_index_name):
+            print('using ' + kallisto_index_name + ' as kallisto index')
+        else:
+            print('Checking if fasta headers and bed file transcript_ids match...')
+            check_bed = check_bed_in_fa(bed_filename, fasta)
+            if not check_bed:
+                print("Can't find transcript ids from " + fasta + " in " + bed_filename)
+                print("Trying to converting fasta header format to match transcript ids to the BED file...")
+                cmd = "sed 's/[|]/ /g' " + fasta + " > " + test_folder + "/transcripts.fa"
+                if print_cmds:
+                    print('running command: ' + cmd)
+                subprocess.call(cmd, shell=True)
+                fasta = test_folder + "/transcripts.fa"
+                check_bed_converted = check_bed_in_fa(bed_filename, fasta)
+                if not check_bed_converted:
+                    subprocess.call("rm -f " + fasta, shell=True)
+                    sys.exit("Can't find any of the first 10 BED transcript_ids in fasta file... Check that these match")
+            else:
+                print("OK!")
+    
+            cmd = 'kallisto index -i ' + kallisto_index_name  + ' ' + fasta
+            print('generating kallisto index')
             if print_cmds:
                 print('running command: ' + cmd)
             subprocess.call(cmd, shell=True)
-            fasta = test_folder + "/transcripts.fa"
-            check_bed_converted = check_bed_in_fa(bed_filename, fasta)
-            if not check_bed_converted:
-                subprocess.call("rm -f " + fasta, shell=True)
-                sys.exit("Can't find any of the first 10 BED transcript_ids in fasta file... Check that these match")
+    
+            if not check_bed:
+                cmd = "rm -f " + fasta
+                subprocess.call(cmd, shell=True)
+    
+        print('creating fastq files with first ' + str(n_reads) + ' reads')
+        reads_1_sample = test_folder + '/' + os.path.basename(reads_1).replace('.fastq' ,'').replace('.fq' ,'').replace('.gz' ,'') + '_sample.fq'
+        reads_2_sample = test_folder + '/' + os.path.basename(reads_2).replace('.fastq' ,'').replace('.fq' ,'').replace('.gz' ,'') + '_sample.fq'
+        # check if the fasta is gzipped
+        if(is_gz_file(reads_1)):
+            cmd = 'zcat < ' + reads_1 + ' | head -n ' + str(n_reads * 4) + ' > ' + reads_1_sample
         else:
-            print("OK!")
-
-        cmd = 'kallisto index -i ' + kallisto_index_name  + ' ' + fasta
-        print('generating kallisto index')
+            cmd = 'head ' + reads_1 + ' -n ' + str(n_reads * 4) + ' > ' + reads_1_sample
         if print_cmds:
             print('running command: ' + cmd)
         subprocess.call(cmd, shell=True)
-
-        if not check_bed:
-            cmd = "rm -f " + fasta
-            subprocess.call(cmd, shell=True)
-
-    print('creating fastq files with first ' + str(n_reads) + ' reads')
-    reads_1_sample = test_folder + '/' + os.path.basename(reads_1).replace('.fastq' ,'').replace('.fq' ,'').replace('.gz' ,'') + '_sample.fq'
-    reads_2_sample = test_folder + '/' + os.path.basename(reads_2).replace('.fastq' ,'').replace('.fq' ,'').replace('.gz' ,'') + '_sample.fq'
-    # check if the fasta is gzipped
-    if(is_gz_file(reads_1)):
-        cmd = 'zcat < ' + reads_1 + ' | head -n ' + str(n_reads * 4) + ' > ' + reads_1_sample
+        if print_cmds:
+            print('running command: ' + cmd)
+        # check if the fasta is gzipped
+        if(is_gz_file(reads_2)):
+            cmd = 'zcat < ' + reads_2 + ' | head -n ' + str(n_reads * 4) + ' > ' + reads_2_sample
+        else:
+            cmd = 'head ' + reads_2 + ' -n ' + str(n_reads * 4) + ' > ' + reads_2_sample
+        subprocess.call(cmd, shell=True)
+    
+        # align with kallisto
+        print('quantifying with kallisto')
+        cmd = 'kallisto quant -i  ' + kallisto_index_name + '  -o ' + test_folder + '/' + 'kallisto_strand_test --genomebam --gtf ' + gtf_filename + ' ' + reads_1_sample + ' ' + reads_2_sample
+        if print_cmds:
+            print('running command: ' + cmd)
+        subprocess.call(cmd, shell=True)
+        thebamfile = test_folder + '/' + 'kallisto_strand_test/pseudoalignments.bam'
     else:
-        cmd = 'head ' + reads_1 + ' -n ' + str(n_reads * 4) + ' > ' + reads_1_sample
-    if print_cmds:
-        print('running command: ' + cmd)
-    subprocess.call(cmd, shell=True)
-    if print_cmds:
-        print('running command: ' + cmd)
-    # check if the fasta is gzipped
-    if(is_gz_file(reads_2)):
-        cmd = 'zcat < ' + reads_2 + ' | head -n ' + str(n_reads * 4) + ' > ' + reads_2_sample
-    else:
-        cmd = 'head ' + reads_2 + ' -n ' + str(n_reads * 4) + ' > ' + reads_2_sample
-    subprocess.call(cmd, shell=True)
-
-    # align with kallisto
-    print('quantifying with kallisto')
-    cmd = 'kallisto quant -i  ' + kallisto_index_name + '  -o ' + test_folder + '/' + 'kallisto_strand_test --genomebam --gtf ' + gtf_filename + ' ' + reads_1_sample + ' ' + reads_2_sample
-    if print_cmds:
-        print('running command: ' + cmd)
-    subprocess.call(cmd, shell=True)
+        thebamfile = bamfile
 
     # check strandedness w/ 2million alignments
     #n_reads = 2000000
     print('checking strandedness')
-    cmd = 'infer_experiment.py -r ' + bed_filename + ' -s ' + str(n_reads) + ' -i ' + test_folder + '/' + 'kallisto_strand_test/pseudoalignments.bam > ' + test_folder + '/' + 'strandedness_check.txt'
+    cmd = 'infer_experiment.py -r ' + bed_filename + ' -s ' + str(n_reads) + ' -i ' + thebamfile + ' > ' + test_folder + '/' + 'strandedness_check.txt'
     if print_cmds:
         print('running command: ' + cmd)
     subprocess.call(cmd, shell=True)
